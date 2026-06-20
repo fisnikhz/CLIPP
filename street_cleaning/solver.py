@@ -194,9 +194,14 @@ class GreedySolver:
         for route in routes:
             vehicle = self.instance.vehicles[route.vehicle_id]
             size = len(route.tasks)
-            positions = {0, size, size // 4, size // 2, (3 * size) // 4}
-            if size > 1:
-                positions.add(self.rng.randrange(size + 1))
+            if size <= 24:
+                positions = set(range(size + 1))
+            else:
+                positions = {
+                    round(index * size / 15) for index in range(16)
+                }
+                for _ in range(8):
+                    positions.add(self.rng.randrange(size + 1))
             for edge_id in edge_ids:
                 edge = self.instance.streets[edge_id]
                 if vehicle.capacity < edge.requirement:
@@ -234,7 +239,9 @@ class GreedySolver:
         return (-candidate.gain, candidate.total_added_time)
 
     def _choose_mandatory(
-        self, candidates: list[Candidate], randomized: bool
+        self,
+        candidates: list[Candidate],
+        randomized: bool,
     ) -> Candidate:
         by_edge: dict[int, list[Candidate]] = {}
         for candidate in candidates:
@@ -324,7 +331,7 @@ class GreedySolver:
             task[0], self.instance.vehicles[vehicle_id].capacity
         )
 
-    def _local_improve(self, plans: list[PlannedRoute], rounds: int = 12) -> None:
+    def _local_improve(self, plans: list[PlannedRoute], rounds: int = 40) -> None:
         """Best-improvement descent over orientation, relocate and swap moves."""
         for _ in range(rounds):
             changed = self._best_orientation_or_relocate(plans)
@@ -332,6 +339,114 @@ class GreedySolver:
             changed = self._best_optional_exchange(plans) or changed
             if not changed:
                 break
+
+        # A one-edge neighborhood cannot cross the common barrier where two or
+        # three mediocre optional tasks must be removed before a better cluster
+        # fits. Use a bounded ALNS-style destroy/repair phase, then descend again.
+        if self.instance.street_count <= 100:
+            if self._destroy_repair_optional(plans, attempts=10):
+                self._local_descent_only(plans, rounds=30)
+
+    def _local_descent_only(self, plans: list[PlannedRoute], rounds: int) -> None:
+        for _ in range(rounds):
+            changed = self._best_orientation_or_relocate(plans)
+            changed = self._best_swap(plans) or changed
+            changed = self._best_optional_exchange(plans) or changed
+            if not changed:
+                return
+
+    def _planned_value(self, plans: list[PlannedRoute]) -> float:
+        return sum(self._task_gain(task, plan.vehicle_id) for plan in plans for task in plan.tasks)
+
+    @staticmethod
+    def _clone_plans(plans: list[PlannedRoute]) -> list[PlannedRoute]:
+        return [PlannedRoute(plan.vehicle_id, plan.tasks[:], plan.elapsed) for plan in plans]
+
+    def _destroy_repair_optional(
+        self, plans: list[PlannedRoute], attempts: int
+    ) -> bool:
+        incumbent_value = self._planned_value(plans)
+        incumbent_time = sum(plan.elapsed for plan in plans)
+        best = self._clone_plans(plans)
+        improved = False
+
+        for _ in range(attempts):
+            trial = self._clone_plans(best)
+            removable: list[tuple[float, int, int, int]] = []
+            for plan_id, plan in enumerate(trial):
+                for position, task in enumerate(plan.tasks):
+                    edge = self.instance.streets[task[0]]
+                    if edge.category != Category.OPTIONAL:
+                        continue
+                    without = plan.tasks[:position] + plan.tasks[position + 1 :]
+                    saved = max(1, plan.elapsed - self._route_time(without))
+                    density = self._task_gain(task, plan_id) / saved
+                    removable.append((density, plan_id, position, edge.id))
+            if len(removable) < 2:
+                break
+
+            removable.sort()
+            pool = removable[: min(14, len(removable))]
+            destroy_count = min(len(pool), self.rng.choice((2, 2, 3, 4)))
+            selected = self.rng.sample(pool, destroy_count)
+            removed_ids = {item[3] for item in selected}
+            by_plan: dict[int, list[int]] = {}
+            for _, plan_id, position, _ in selected:
+                by_plan.setdefault(plan_id, []).append(position)
+            for plan_id, positions in by_plan.items():
+                for position in sorted(positions, reverse=True):
+                    trial[plan_id].tasks.pop(position)
+                trial[plan_id].elapsed = self._route_time(trial[plan_id].tasks)
+
+            # Force exploration away from immediate reinsertion of the destroyed
+            # tasks, then allow them back only after alternative work is packed.
+            self._repair_optional(trial, forbidden=removed_ids, randomized=True)
+            self._repair_optional(trial, forbidden=set(), randomized=True)
+            self._local_descent_only(trial, rounds=8)
+
+            value = self._planned_value(trial)
+            total_time = sum(plan.elapsed for plan in trial)
+            if value > incumbent_value + 1e-15 or (
+                abs(value - incumbent_value) <= 1e-15 and total_time < incumbent_time
+            ):
+                best = trial
+                incumbent_value = value
+                incumbent_time = total_time
+                improved = True
+
+        if improved:
+            for index, plan in enumerate(best):
+                plans[index].tasks = plan.tasks
+                plans[index].elapsed = plan.elapsed
+        return improved
+
+    def _repair_optional(
+        self,
+        plans: list[PlannedRoute],
+        *,
+        forbidden: set[int],
+        randomized: bool,
+    ) -> None:
+        owned = {task[0] for plan in plans for task in plan.tasks}
+        remaining = {
+            edge.id
+            for edge in self.instance.streets
+            if edge.category == Category.OPTIONAL
+            and edge.id not in owned
+            and edge.id not in forbidden
+        }
+        while remaining:
+            candidates = [
+                candidate
+                for candidate in self._all_candidates(plans, remaining)
+                if candidate.gain > 1e-15
+            ]
+            if not candidates:
+                return
+            candidates.sort(key=self._optional_key)
+            chosen = self._restricted_choice(candidates, randomized, width=6)
+            self._apply(chosen, plans[chosen.vehicle_id])
+            remaining.remove(chosen.edge_id)
 
     def _best_orientation_or_relocate(self, plans: list[PlannedRoute]) -> bool:
         best_merit = (0.0, 0)

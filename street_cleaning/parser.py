@@ -57,7 +57,9 @@ def parse_instance(path: str | Path) -> Instance:
         if pair in seen_pairs:
             raise ValueError(f"street {edge_id}: duplicate junction pair")
         seen_pairs.add(pair)
-        if direction not in (1, 2) or travel_time <= 0 or length < 0:
+        # Accept both common encodings: 0/1 (judge) and 1/2 (legacy datasets).
+        # In both forms, 1 is one-way; 0 or 2 is bidirectional.
+        if direction not in (0, 1, 2) or travel_time <= 0 or length < 0:
             raise ValueError(f"street {edge_id}: invalid direction, time, or length")
         if category == Category.CONNECTOR:
             if requirement != 0:

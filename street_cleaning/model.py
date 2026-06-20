@@ -25,7 +25,7 @@ class Street:
     requirement: int
 
     def orientations(self) -> tuple[tuple[int, int], ...]:
-        if self.direction == 2:
+        if self.direction != 1:
             return ((self.a, self.b), (self.b, self.a))
         return ((self.a, self.b),)
 

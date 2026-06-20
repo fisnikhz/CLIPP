@@ -31,7 +31,7 @@ class Graph:
         self.edge_by_pair: dict[tuple[int, int], int] = {}
         for edge in instance.streets:
             self._add_arc(edge.a, edge.b, edge.id, edge.time)
-            if edge.direction == 2:
+            if edge.direction != 1:
                 self._add_arc(edge.b, edge.a, edge.id, edge.time)
             self.edge_by_pair[(edge.a, edge.b)] = edge.id
             self.edge_by_pair[(edge.b, edge.a)] = edge.id
